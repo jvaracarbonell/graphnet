@@ -16,7 +16,7 @@ if has_icecube_package() or TYPE_CHECKING:
         dataclasses,
         icetray,
         phys_services,
-    )  # pyright: reportMissingImports=false
+    )  
 
 
 class I3TruthExtractor(I3Extractor):
@@ -84,7 +84,7 @@ class I3TruthExtractor(I3Extractor):
         self, frame: "icetray.I3Frame", padding_value: Any = -1
     ) -> Dict[str, Any]:
         """Extract truth-level information."""
-        is_mc = frame_is_montecarlo(frame, self._mctree)
+        is_mc = True#frame_is_montecarlo(frame, self._mctree)
         is_noise = frame_is_noise(frame, self._mctree)
         sim_type = self._find_data_type(is_mc, self._i3_file)
 
@@ -108,7 +108,9 @@ class I3TruthExtractor(I3Extractor):
             "track_length": padding_value,
             "stopped_muon": padding_value,
             "energy_track": padding_value,
+            "energy_muon": padding_value,
             "energy_cascade": padding_value,
+            "deposited_energy": padding_value,
             "inelasticity": padding_value,
             "DeepCoreFilter_13": padding_value,
             "CascadeFilter_13": padding_value,
@@ -127,6 +129,7 @@ class I3TruthExtractor(I3Extractor):
         if frame["I3EventHeader"].sub_event_stream not in [
             "InIceSplit",
             "Final",
+            "SplitInIceGen2",
         ]:
             return output
 
@@ -166,7 +169,8 @@ class I3TruthExtractor(I3Extractor):
         if "L7_oscNext_bool" in frame:
             output["L7_oscNext_bool"] = int(bool(frame["L7_oscNext_bool"]))
 
-        if is_mc and (not is_noise):
+        if True:#is_mc and (not is_noise):
+            '''
             (
                 MCInIcePrimary,
                 interaction_type,
@@ -187,26 +191,42 @@ class I3TruthExtractor(I3Extractor):
                     padding_value,
                     padding_value,
                 )
+            '''
+            if 'LabelsDeepLearning' in frame:
+                energy_muon = frame['LabelsDeepLearning']['muon_energy']
+            else:
+                energy_muon = MCInIcePrimary.energy
+
+            if 'LabelsDeepLearning' in frame:
+                deposited_energy = frame['LabelsDeepLearning']['track_energy'] + frame['LabelsDeepLearning']['cascade_energy']
+                energy_cascade = frame['LabelsDeepLearning']['cascade_energy']
+                energy_track = frame['LabelsDeepLearning']['track_energy']
+            else:
+                deposited_energy = MCInIcePrimary.energy
+
 
             output.update(
                 {
-                    "energy": MCInIcePrimary.energy,
-                    "position_x": MCInIcePrimary.pos.x,
-                    "position_y": MCInIcePrimary.pos.y,
-                    "position_z": MCInIcePrimary.pos.z,
-                    "azimuth": MCInIcePrimary.dir.azimuth,
-                    "zenith": MCInIcePrimary.dir.zenith,
-                    "pid": MCInIcePrimary.pdg_encoding,
-                    "interaction_type": interaction_type,
-                    "elasticity": elasticity,
-                    "dbang_decay_length": self._extract_dbang_decay_length(
-                        frame, padding_value
-                    ),
+                    #"energy": MCInIcePrimary.energy,
+                    #"position_x": MCInIcePrimary.pos.x,
+                    #"position_y": MCInIcePrimary.pos.y,
+                    #"position_z": MCInIcePrimary.pos.z,
+                    "azimuth": frame['LabelsDeepLearning']['azimuth'],
+                    "zenith": frame['LabelsDeepLearning']['zenith'],
+                    #"pid": MCInIcePrimary.pdg_encoding,
+                    #"interaction_type": interaction_type,
+                    #"elasticity": elasticity,
+                    #"dbang_decay_length": self._extract_dbang_decay_length(
+                    #    frame, padding_value
+                    #),
                     "energy_track": energy_track,
                     "energy_cascade": energy_cascade,
-                    "inelasticity": inelasticity,
+                    "deposited_energy": deposited_energy,
+                    "energy_muon": energy_muon,
+                    #"inelasticity": inelasticity,
                 }
             )
+            '''
             if abs(output["pid"]) == 13:
                 output.update(
                     {
@@ -224,7 +244,7 @@ class I3TruthExtractor(I3Extractor):
                         "stopped_muon": muon_final["stopped"],
                     }
                 )
-
+            '''
         return output
 
     def _extract_dbang_decay_length(

@@ -23,6 +23,30 @@ class FEATURES:
         "pmt_dir_z",
         "dom_type",
     ]
+    ICECUBEGEN2SUM = [
+        "dom_x",
+        "dom_y",
+        "dom_z",
+        "sum_4", # first time
+        "string",
+        "pmt_number",
+        "dom_number",
+        "pmt_dir_x",
+        "pmt_dir_y",
+        "pmt_dir_z",
+        "dom_type",
+        "sum_1",
+        "sum_2",
+        "sum_3",
+        "sum_5",
+        "sum_6",
+        "sum_7",
+        "sum_8",
+        "sum_9",
+        "is_saturated_dom",
+        "is_errata_dom",
+
+    ]
     PROMETHEUS = [
         "sensor_pos_x",
         "sensor_pos_y",
@@ -40,6 +64,8 @@ class TRUTH:
         "energy",
         "energy_track",
         "energy_cascade",
+        "energy_muon",
+        "deposited_energy",
         "position_x",
         "position_y",
         "position_z",
@@ -54,6 +80,7 @@ class TRUTH:
     ]
     DEEPCORE = ICECUBE86
     UPGRADE = DEEPCORE
+    ICECUBEGEN2SUM = ICECUBE86
     PROMETHEUS = [
         "injection_energy",
         "injection_type",

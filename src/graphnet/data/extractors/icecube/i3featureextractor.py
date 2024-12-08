@@ -8,7 +8,7 @@ from graphnet.data.extractors.icecube.utilities.frames import (
 from graphnet.utilities.imports import has_icecube_package
 
 if has_icecube_package() or TYPE_CHECKING:
-    from icecube import icetray  # pyright: reportMissingImports=false
+    from icecube import icetray  
 
 
 class I3FeatureExtractor(I3Extractor):
@@ -42,7 +42,7 @@ class I3FeatureExtractorIceCube86(I3FeatureExtractor):
             Dictionary of reconstructed features for all pulses in `pulsemap`,
                 in pure-python format.
         """
-        padding_value: float = -1.0
+        padding_value: float = 0.0#-1.0
         output: Dict[str, List[Any]] = {
             "charge": [],
             "dom_time": [],

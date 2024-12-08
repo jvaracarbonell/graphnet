@@ -8,7 +8,7 @@ if has_icecube_package():
     from icecube import (
         dataclasses,
         icetray,
-    )  # pyright: reportMissingImports=false
+    ) 
 
 
 def frame_is_montecarlo(
@@ -80,5 +80,30 @@ def get_om_keys_and_pulseseries(
                 frame, pulseseries
             )
             om_keys = data.keys()
+
+    return om_keys, data
+
+def get_dnn_values(
+    frame: "icetray.I3Frame",
+    pulseseries: str,
+    calibration: Optional["dataclasses.I3Calibration"] = None,
+) -> Tuple[Any, Any]:
+    """Get the indicies for the gcd_dict and the pulse series.
+
+    Args:
+        frame: Physics (P) I3-frame from which to extract OM keys and pulse
+            series
+
+    Returns:
+        Tuple containing the OM keys/indicesfor the GCD dictionary, and the
+        pulse series data.
+    """
+    try:
+        data = frame[pulseseries]
+        #data = frame["dnn_data_bin_values"]
+    except KeyError:
+        raise KeyError(f"Pulse series {pulseseries} does not exist in `frame`")
+
+    om_keys = data.keys()
 
     return om_keys, data
