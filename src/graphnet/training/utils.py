@@ -139,7 +139,7 @@ def make_train_validation_dataloader(
     batch_size: int,
     database_indices: Optional[List[int]] = None,
     seed: int = 42,
-    test_size: float = 0.33,
+    test_size: float = 0.15,
     num_workers: int = 10,
     persistent_workers: bool = True,
     node_truth: Optional[str] = None,
