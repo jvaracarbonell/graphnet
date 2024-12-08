@@ -594,7 +594,6 @@ class DirRecoStandardFlowTask(Task):
         else:
             try:
                 #print("Labels: ", labels)
-                print(1/0)
                 # Attempt the forward pass and result computation for the batch
                 result_dict = self._flow.coverage_and_or_pdf_scan(
                     labels=labels,
@@ -642,13 +641,12 @@ class DirRecoStandardFlowTask(Task):
                 # Print to check the values and their shapes
                 print("reco zenith:", map_positions_angle_0_batch)
                 print("reco azimuth:", map_positions_angle_1_batch)
-                print("approx_cov_value_0:", approx_cov_value_0_batch)
+                print("approx_cov_value_0:", approx_cov_value_0_batch) # This is a test, do not use this one
 
                 return output
 
             except Exception as e:
                 try:
-                    print(1/0)
                     # In case of any errors (including NaN), return a tensor filled with NaNs for the batch
                     print("Error occurred during forward pass:", str(e))
                     batch_size = labels.size(0)
