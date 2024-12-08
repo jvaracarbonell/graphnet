@@ -8,7 +8,7 @@ from torch.optim import Adam
 
 from graphnet.models.gnn.gnn import GNN
 from .easy_model import EasySyntax
-from graphnet.models.task import StandardFlowTask
+from graphnet.models.task import StandardFlowTask, DirRecoStandardFlowTask, EnergyRecoStandardFlowTask
 from graphnet.models.graphs import GraphDefinition
 from graphnet.models.utils import get_fields
 
@@ -27,8 +27,10 @@ class NormalizingFlow(EasySyntax):
         graph_definition: GraphDefinition,
         target_labels: str,
         backbone: GNN = None,
+        direction_reco : bool = False,
         condition_on: Union[str, List[str], None] = None,
-        flow_layers: str = "gggt",
+        flow_layers: str = "vvvvvv",
+        add_rotation: bool = False,
         optimizer_class: Type[torch.optim.Optimizer] = Adam,
         optimizer_kwargs: Optional[Dict] = None,
         scheduler_class: Optional[type] = None,
@@ -91,9 +93,12 @@ class NormalizingFlow(EasySyntax):
             hidden_size = None
 
         # Build Flow Task
-        task = StandardFlowTask(
+        
+        FlowTask = DirRecoStandardFlowTask if direction_reco else EnergyRecoStandardFlowTask#StandardFlowTask
+        task = FlowTask(
             hidden_size=hidden_size,
             flow_layers=flow_layers,
+            add_rotation=add_rotation,
             target_labels=target_labels,
         )
 
@@ -127,8 +132,21 @@ class NormalizingFlow(EasySyntax):
                 # Unconditional flow
                 x = None
             x = self._tasks[0](x, d)
+            # Ensure x is a tensor before appending to x_list
+            if isinstance(x, tuple):
+                # Assuming the tuple contains tensors, concatenate them or process them individually
+                x = torch.cat([torch.as_tensor(elem, dtype=torch.float64) if not torch.is_tensor(elem) else elem for elem in x], dim=-1)
+            
+            if torch.isnan(x).any():
+                print(f"NaNs detected in concatenated input x: {x}")
+                x = torch.zeros_like(x, dtype=torch.float64) 
+                
             x_list.append(x)
+            
+            
+            
         x = torch.cat(x_list, dim=0)
+        #print("I return x: ",x, " and the input data is data: ",data)
         return [x]
 
     def _backbone(
@@ -147,10 +165,15 @@ class NormalizingFlow(EasySyntax):
         if isinstance(loss, list):
             assert len(loss) == 1
             loss = loss[0]
+        if torch.isnan(loss).any():
+            print(f"NaNs detected in batch {batch_idx}, setting loss to zero, this will effectively set the gradients to 0 as well, since the loss is a constant value.")
+            # Return a zero loss to avoid further issues
+            return torch.tensor(0.0, requires_grad=True, device=loss.device)
         return torch.mean(loss, dim=0)
 
     def validate_tasks(self) -> None:
         """Verify that self._tasks contain compatible elements."""
-        accepted_tasks = StandardFlowTask
+        accepted_tasks = [StandardFlowTask, DirRecoStandardFlowTask, EnergyRecoStandardFlowTask]
         for task in self._tasks:
-            assert isinstance(task, accepted_tasks)
+            assert any(isinstance(task, accepted_task) for accepted_task in accepted_tasks), f"Task {task} is not an instance of any accepted tasks."
+

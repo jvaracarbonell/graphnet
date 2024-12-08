@@ -52,6 +52,7 @@ class EasySyntax(Model):
         self._scheduler_class = scheduler_class
         self._scheduler_kwargs = scheduler_kwargs or dict()
         self._scheduler_config = scheduler_config or dict()
+       
 
         self.validate_tasks()
 
@@ -212,48 +213,149 @@ class EasySyntax(Model):
             label for task in self._tasks for label in task._prediction_labels
         ]
 
-    def configure_optimizers(self) -> Dict[str, Any]:
-        """Configure the model's optimizer(s)."""
-        optimizer = self._optimizer_class(
+    def configure_optimizers(self):
+        """Configure the model's optimizers for both the flow (float64) and the rest (float32)."""
+        
+        # Find the task with the flow
+        task_with_flow = None
+        for task in self._tasks:
+            if hasattr(task, '_flow'):
+                task_with_flow = task
+                break
+
+        self._multiple_optimizers = False
+        if task_with_flow is not None and False:
+
+            optimizers = []
+            schedulers = []
+
+
+            print("Training with multiple optimizers, disabling automatic_optimization")
+            self.automatic_optimization = False
+            self._multiple_optimizers = True
+            # Optimizer for the flow (float64 parameters)
+            optimizer_flow = self._optimizer_class(task_with_flow._flow.parameters(), **self._optimizer_kwargs)
+            optimizers.append(optimizer_flow)
+
+            # Get the flow parameters as a set of unique memory addresses
+            flow_params = set(p for p in task_with_flow._flow.parameters())
+
+            # Filter out flow parameters from the full list of model parameters
+            rest_params = set(p for p in self.parameters()) - flow_params
+
+            # Optimizer for the rest of the model (excluding flow parameters)
+            optimizer = self._optimizer_class(list(rest_params), **self._optimizer_kwargs)
+            optimizers.append(optimizer)
+
+            # Optionally configure the learning rate scheduler for both optimizers
+            if self._scheduler_class is not None:
+                scheduler_flow = self._scheduler_class(optimizer_flow, **self._scheduler_kwargs)
+                scheduler_rest = self._scheduler_class(optimizer, **self._scheduler_kwargs)
+
+                # Return both optimizers and their associated schedulers in the proper format
+                return [
+                    {"optimizer": optimizer_flow, "lr_scheduler": scheduler_flow, "interval": "step", "monitor": "train_loss"},
+                    {"optimizer": optimizer, "lr_scheduler": scheduler_rest, "interval": "step", "monitor": "train_loss"}
+                ]
+            return optimizers  # Return the optimizers if no schedulers are set
+
+        else:
+            # If no task with flow is found, configure a single optimizer
+            optimizer = self._optimizer_class(
             self.parameters(), **self._optimizer_kwargs
-        )
-        config = {
-            "optimizer": optimizer,
-        }
-        if self._scheduler_class is not None:
-            scheduler = self._scheduler_class(
-                optimizer, **self._scheduler_kwargs
             )
-            config.update(
-                {
-                    "lr_scheduler": {
-                        "scheduler": scheduler,
-                        **self._scheduler_config,
-                    },
-                }
-            )
-        return config
+            config = {
+                "optimizer": optimizer,
+            }
+            if self._scheduler_class is not None:
+                scheduler = self._scheduler_class(
+                    optimizer, **self._scheduler_kwargs
+                )
+                config.update(
+                    {
+                        "lr_scheduler": {
+                            "scheduler": scheduler,
+                            **self._scheduler_config,
+                        },
+                    }
+                )
+            return config
+            
 
-    def training_step(
-        self, train_batch: Union[Data, List[Data]], batch_idx: int
-    ) -> Tensor:
-        """Perform training step."""
-        if isinstance(train_batch, Data):
-            train_batch = [train_batch]
-        loss = self.shared_step(train_batch, batch_idx)
-        self.log(
-            "train_loss",
-            loss,
-            batch_size=self._get_batch_size(train_batch),
-            prog_bar=True,
-            on_epoch=True,
-            on_step=False,
-            sync_dist=True,
-        )
+    def training_step(self, train_batch: Union[Data, List[Data]], batch_idx: int) -> Tensor:
+        """Perform training step, separating flow optimizer and default optimizer."""
+        
+        if self._multiple_optimizers:
+            """ Using mixing precision float64/float32 for flow training"""
+            if isinstance(train_batch, Data):
+                train_batch = [train_batch]
 
-        current_lr = self.trainer.optimizers[0].param_groups[0]["lr"]
-        self.log("lr", current_lr, prog_bar=True, on_step=True)
-        return loss
+            # Compute loss for the flow part (in float64)
+            loss = self.shared_step(train_batch, batch_idx)
+
+            # Get both optimizers
+            optimizer_flow, optimizer = self.optimizers()
+
+            # Manually perform the backward pass without relying on PyTorch Lightning's precision plugin
+            # Ensure loss for the flow optimizer remains float64
+            loss_float64 = loss.to(dtype=torch.float64)
+            
+            # Perform backward pass for the float64 part (normalizing flow)
+            loss_float64.backward(retain_graph=True)
+
+            # Convert the loss to float32 for the rest of the model
+            loss_default_dtype = loss_float64.to(dtype=torch.float32)
+
+            # Perform backward pass for the rest of the model (float32 parameters)
+            loss_default_dtype.backward()
+
+            # Now perform the optimizer steps
+            optimizer_flow.step()
+            optimizer_flow.zero_grad()
+
+            optimizer.step()
+            optimizer.zero_grad()
+
+            # Log the training loss and learning rate
+            self.log("train_loss", loss_default_dtype, batch_size=self._get_batch_size(train_batch), prog_bar=True, on_epoch=True, on_step=True, sync_dist=True)
+
+            current_lr = optimizer.param_groups[0]["lr"]
+            current_lr_flow = optimizer_flow.param_groups[0]["lr"]
+            assert (current_lr == current_lr_flow), f"Learning rate of the two optimizers is different!!! Flows = {current_lr_flow}, normal = {current_lr}"
+            self.log("lr", current_lr, prog_bar=True, on_step=True)
+
+            return loss_default_dtype
+
+        else:
+
+            """Perform training step."""
+            if isinstance(train_batch, Data):
+                train_batch = [train_batch]
+            loss = self.shared_step(train_batch, batch_idx)
+            if torch.isnan(loss).any() or (loss == 0).all():
+                # If NaNs are found, zero out the gradients and skip this step
+                self.trainer.optimizers[0].zero_grad()
+                print(f"NaN encountered at batch {batch_idx}, skipping backpropagation")
+                # Optionally log NaNs occurrence
+                self.log("train_loss_nan", 1, prog_bar=True, on_step=True, on_epoch=True)
+                return torch.tensor(0.0, requires_grad=True)  # Return a zero tensor to avoid further issues
+            else:
+                # Normal training step if no NaNs are found
+                self.log(
+                    "train_loss",
+                    loss,
+                    batch_size=self._get_batch_size(train_batch),
+                    prog_bar=True,
+                    on_epoch=True,
+                    on_step=True,
+                    sync_dist=True,
+                )
+                current_lr = self.trainer.optimizers[0].param_groups[0]["lr"]
+                self.log("lr", current_lr, prog_bar=True, on_step=True)
+                return loss
+
+
+
 
     def validation_step(
         self, val_batch: Union[Data, List[Data]], batch_idx: int
@@ -365,8 +467,8 @@ class EasySyntax(Model):
             torch.cat(predictions_torch, dim=1).detach().cpu().numpy()
         )
         assert len(prediction_columns) == predictions.shape[1], (
-            f"Number of provided column names ({len(prediction_columns)}) and "
-            f"number of output columns ({predictions.shape[1]}) don't match."
+            f"Number of provided column names ({len(prediction_columns)}) and {prediction_columns} "
+            f"number of output columns ({predictions.shape[1]}) don't match {predictions}."
         )
 
         # Check if predictions are on event- or pulse-level

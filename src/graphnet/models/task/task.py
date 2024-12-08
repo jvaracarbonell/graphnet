@@ -9,6 +9,7 @@ from copy import deepcopy
 import torch
 from torch import Tensor
 from torch.nn import Linear
+import timeit
 from torch_geometric.data import Data
 
 if TYPE_CHECKING:
@@ -439,6 +440,7 @@ class StandardFlowTask(Task):
                     f"inputs have {x.shape[0]} rows. "
                     "The number of rows must match."
                 )
+           # print(f"Cond inputttt is {x}","\n"*5)
             log_pdf, _, _ = self._flow(y, conditional_input=x)
         else:
             log_pdf, _, _ = self._flow(y)
@@ -462,4 +464,296 @@ class StandardFlowTask(Task):
             self._initialized = True  # This is only done once
         # Compute nllh
         x = self._forward(x, labels)
+        return self._transform_prediction(x)
+
+
+class DirRecoStandardFlowTask(Task):
+    """A `Task` for `NormalizingFlow`s in GraphNeT.
+
+    This Task requires the support package`jammy_flows` for constructing and
+    evaluating normalizing flows.
+    """
+
+    def __init__(
+        self,
+        hidden_size: Union[int, None],
+        flow_layers: str = "vvvvvv", # 9 vs might be better
+        add_rotation = False,
+        **task_kwargs: Any,
+    ):
+        """Construct `DirRecoStandardFlowTask`.
+
+        Args:
+            target_labels: A list of names for the targets of this Task.
+            flow_layers: A string indicating the flow layer types. See
+             https://thoglu.github.io/jammy_flows/usage/introduction.html
+             for details.
+            hidden_size: The number of columns on which the normalizing flow
+            is conditioned on. May be `None`, indicating non-conditional flow.
+        """
+        # Base class constructor
+
+        # Member variables
+        self._default_prediction_labels = ["reco_zenith","reco_azimuth","approx_cov_values"]
+        self._hidden_size = hidden_size
+        self._flow_layers = flow_layers
+        self._add_rotation = add_rotation
+        super().__init__(**task_kwargs)
+        opt_dict=dict()
+
+        opt_dict["v"]=dict()
+        opt_dict["v"]["add_rotation"]=1
+
+        #pdf=jammy_flows.pdf("s2", flow_layers, options_overwrite=opt_dict)
+        print("\n",f"Conditional input size = {hidden_size}","\n")
+        if add_rotation:
+            print("Including rotation")
+            self._flow = jammy_flows.pdf(
+                "s2",
+                self._flow_layers,
+                conditional_input_dim=hidden_size,
+                options_overwrite=opt_dict,
+            )
+        else:
+            print("no rotation")
+            self._flow = jammy_flows.pdf(
+                "s2",
+                self._flow_layers,
+                conditional_input_dim=hidden_size,
+                #options_overwrite=opt_dict,
+            )
+        
+        self._initialized = True#False
+
+    @property
+    def default_prediction_labels(self) -> List[str]:
+        """Return default prediction labels."""
+        return self._default_prediction_labels
+
+    def nb_inputs(self) -> Union[int, None]:  # type: ignore
+        """Return number of conditional inputs assumed by task."""
+        return self._hidden_size
+
+    def _forward(self, x: Optional[Tensor], y: Tensor) -> Tensor:  # type: ignore
+        if x is not None:
+            #print(f"Labels are {y} \n")
+            if x.shape[0] != y.shape[0]:
+                raise AssertionError(
+                    f"Targets {self._target_labels} have "
+                    f"{y.shape[0]} rows while conditional "
+                    f"inputs have {x.shape[0]} rows. "
+                    "The number of rows must match."
+                )
+            
+            if torch.isnan(y).any():
+                print("NaN detected in 'y' before _flow")
+                return torch.zeros(len(y), device=y.device, dtype=torch.float64, requires_grad=True).reshape(-1, 1)
+
+
+            if torch.isnan(x).any():
+                print(f"NaN detected in 'conditional_input' before _flow. x: {x}")
+                return torch.zeros(len(y), device=y.device, dtype=torch.float64, requires_grad=True).reshape(-1, 1)
+
+            # After computing log_pdf, print its shape
+            log_pdf, _, _ = self._flow(y, conditional_input=x)
+            #print(f"Shape of 'log_pdf': {log_pdf.shape}")
+
+            # Check for NaNs in log_pdf and set it to zeros if NaNs are found
+            if torch.isnan(log_pdf).any():
+                return torch.zeros(len(y), device=y.device, dtype=torch.float64, requires_grad=True).reshape(-1, 1)
+   
+        else:
+            log_pdf, _, _ = self._flow(y)
+        
+        return -log_pdf.reshape(-1, 1)
+
+    @final
+    def forward(
+        self, x: Union[Tensor, Data], data: List[Data]
+    ) -> Union[Tensor, Data]:
+        """Forward pass."""
+        # Manually cast pdf to correct dtype - is there a better way?
+        self._flow = self._flow.to(dtype=torch.float64)
+        # Get target values
+        labels = get_fields(data=data, fields=self._target_labels)
+        labels = labels.to(dtype=torch.float64)
+        # Set the initial parameters of flow close to truth
+        # This speeds up training and helps with NaN
+        #self.training = True
+        if self._initialized is False and self.training:
+            self._flow.init_params(data=deepcopy(labels).cpu())
+            self._flow.to(self.device)
+            self._initialized = True  # This is only done once
+        
+        if self.training:
+            # Compute nllh
+            x = x.to(dtype=torch.float64)
+            x = self._forward(x, labels)
+            #print("Esto es lo que devuelve: ", self._transform_prediction(x))
+            return self._transform_prediction(x)
+        else:
+            try:
+                #print("Labels: ", labels)
+                print(1/0)
+                # Attempt the forward pass and result computation for the batch
+                result_dict = self._flow.coverage_and_or_pdf_scan(
+                    labels=labels,
+                    conditional_input=x,
+                    amortization_parameters=None,
+                    coverage_num_percentile_points=100,
+                    exact_coverage_calculation=False,
+                    save_pdf_scan=False,
+                    calculate_MAP=True
+                )
+
+                # Loop through the results to print them for debugging
+                for key, val in result_dict.items():
+                    print(key, val)
+
+              
+                # Assume that result_dict["map_positions_angles"] has the shape [batch_size, 2]
+                batch_size = result_dict["map_positions_angles"].shape[0]
+
+                # Prepare lists to store results for the batch
+                map_positions_angle_0_list = []
+                map_positions_angle_1_list = []
+                approx_cov_value_0_list = []
+
+                # Iterate over the batch
+                for i in range(batch_size):
+                    # Convert result to torch tensors, handling both arrays and scalars for each element in the batch
+                    map_positions_angle_0 = torch.tensor(result_dict["map_positions_angles"][i][0]).reshape(1, 1)  # Reshape to ensure [1, 1]
+                    map_positions_angle_1 = torch.tensor(result_dict["map_positions_angles"][i][1]).reshape(1, 1)  # Reshape to ensure [1, 1]
+                    approx_cov_value_0 = torch.tensor(result_dict["approx_cov_values"][i]).reshape(1, 1)  # Reshape to [1, 1] for consistency
+
+                    # Append to lists
+                    map_positions_angle_0_list.append(map_positions_angle_0)
+                    map_positions_angle_1_list.append(map_positions_angle_1)
+                    approx_cov_value_0_list.append(approx_cov_value_0)
+
+                # Stack the tensors along dim=1 for the batch
+                map_positions_angle_0_batch = torch.cat(map_positions_angle_0_list, dim=0)  # Use cat for proper batch concatenation
+                map_positions_angle_1_batch = torch.cat(map_positions_angle_1_list, dim=0)
+                approx_cov_value_0_batch = torch.cat(approx_cov_value_0_list, dim=0)
+
+                # Stack them together to form the final output (shape: [batch_size, 3])
+                output = torch.cat((map_positions_angle_0_batch, map_positions_angle_1_batch, approx_cov_value_0_batch), dim=1)
+
+                # Print to check the values and their shapes
+                print("reco zenith:", map_positions_angle_0_batch)
+                print("reco azimuth:", map_positions_angle_1_batch)
+                print("approx_cov_value_0:", approx_cov_value_0_batch)
+
+                return output
+
+            except Exception as e:
+                try:
+                    print(1/0)
+                    # In case of any errors (including NaN), return a tensor filled with NaNs for the batch
+                    print("Error occurred during forward pass:", str(e))
+                    batch_size = labels.size(0)
+                    print(f"Nans, batch size is of {batch_size}")
+                    # Return a tensor with NaN values (shape: [batch_size, 3])
+                    nan_tensor = torch.tensor(float('nan')).repeat(batch_size, 3)
+                    return nan_tensor
+                except:
+                    #print("Probably in sanity check mode")
+                    x = x.to(dtype=torch.float64)
+                    x = self._forward(x, labels)
+                    return self._transform_prediction(x)
+
+
+
+class EnergyRecoStandardFlowTask(Task):
+    """A `Task` for `NormalizingFlow`s in GraphNeT.
+
+    This Task requires the support package`jammy_flows` for constructing and
+    evaluating normalizing flows.
+    """
+
+    def __init__(
+        self,
+        hidden_size: Union[int, None],
+        flow_layers: str = "gggt",
+        **task_kwargs: Any,
+    ):
+        """Construct `DirRecoStandardFlowTask`.
+
+        Args:
+            target_labels: A list of names for the targets of this Task.
+            flow_layers: A string indicating the flow layer types. See
+             https://thoglu.github.io/jammy_flows/usage/introduction.html
+             for details.
+            hidden_size: The number of columns on which the normalizing flow
+            is conditioned on. May be `None`, indicating non-conditional flow.
+        """
+        # Base class constructor
+
+        # Member variables
+        self._default_prediction_labels = ["nllh"]
+        self._hidden_size = hidden_size
+        super().__init__(**task_kwargs)
+        
+        flow_layers: str = "ggt"
+        opt_dict=dict()
+
+        #pdf=jammy_flows.pdf("s2", flow_layers, options_overwrite=opt_dict)
+        print("\n",f"Conditional input size = {hidden_size}","\n")
+        self._flow = jammy_flows.pdf(
+            f"e1",
+            flow_layers,
+            conditional_input_dim=hidden_size,
+        )
+        self._initialized = False
+
+    @property
+    def default_prediction_labels(self) -> List[str]:
+        """Return default prediction labels."""
+        return self._default_prediction_labels
+
+    def nb_inputs(self) -> Union[int, None]:  # type: ignore
+        """Return number of conditional inputs assumed by task."""
+        return self._hidden_size
+
+    def _forward(self, x: Optional[Tensor], y: Tensor) -> Tensor:  # type: ignore
+        if x is not None:
+            #print(f"Labels are {y} \n")
+            if x.shape[0] != y.shape[0]:
+                raise AssertionError(
+                    f"Targets {self._target_labels} have "
+                    f"{y.shape[0]} rows while conditional "
+                    f"inputs have {x.shape[0]} rows. "
+                    "The number of rows must match."
+                )
+           # print(f"Cond inputttt is {x}","\n"*5)
+            #print("labels: ", y)
+            #print("cond_input: ",x)
+            y_log10 = torch.log10(y)
+            log_pdf, _, _ = self._flow(y_log10, conditional_input=x)
+            #print("y",y_log10)
+            #print("losss: ",-log_pdf)
+        else:
+            log_pdf, _, _ = self._flow(y_log10)
+        return -log_pdf.reshape(-1, 1)
+
+    @final
+    def forward(
+        self, x: Union[Tensor, Data], data: List[Data]
+    ) -> Union[Tensor, Data]:
+        """Forward pass."""
+        # Manually cast pdf to correct dtype - is there a better way?
+        self._flow = self._flow.to(self.dtype)
+        # Get target values
+        labels = get_fields(data=data, fields=self._target_labels)
+        labels = labels.to(self.dtype)
+        # Set the initial parameters of flow close to truth
+        # This speeds up training and helps with NaN
+        if self._initialized is False:
+            self._flow.init_params(data=deepcopy(torch.log10(labels)).cpu())
+            self._flow.to(self.device)
+            self._initialized = True  # This is only done once
+        # Compute nllh
+        #print("labels",labels)
+        x = self._forward(x, labels)
+        #print("Esto es lo que devuelve: ", self._transform_prediction(x))
         return self._transform_prediction(x)

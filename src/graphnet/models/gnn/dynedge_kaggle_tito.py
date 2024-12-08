@@ -16,7 +16,7 @@ from torch import Tensor, LongTensor
 from torch_geometric.data import Data
 from torch_scatter import scatter_max, scatter_mean, scatter_min, scatter_sum
 
-from graphnet.models.components.layers import DynTrans
+from graphnet.models.components.layers import DynTrans, DynInformer
 from graphnet.models.gnn.gnn import GNN
 from graphnet.models.utils import calculate_xyzt_homophily
 
@@ -34,6 +34,8 @@ class DynEdgeTITO(GNN):
     def __init__(
         self,
         nb_inputs: int,
+        informer: bool = False,
+        factor: int = 5,
         features_subset: List[int] = None,
         dyntrans_layer_sizes: Optional[List[Tuple[int, ...]]] = None,
         global_pooling_schemes: List[str] = ["max"],
@@ -43,11 +45,13 @@ class DynEdgeTITO(GNN):
         readout_layer_sizes: Optional[List[int]] = None,
         n_head: int = 8,
         nb_neighbours: int = 8,
+        norm_flows_range: bool = False,
     ):
         """Construct `DynEdgeTITO`.
 
         Args:
             nb_inputs: Number of input features on each node.
+            informer: Whether to use informer with ProbSparse attention or regular transformer.
             features_subset: The subset of latent features on each node that
                 are used as metric dimensions when performing the k-nearest
                 neighbours clustering. Defaults to [0,1,2,3].
@@ -87,8 +91,12 @@ class DynEdgeTITO(GNN):
 
         assert isinstance(dyntrans_layer_sizes, list)
         assert len(dyntrans_layer_sizes)
-        assert all(isinstance(sizes, tuple) for sizes in dyntrans_layer_sizes)
-        assert all(len(sizes) > 0 for sizes in dyntrans_layer_sizes)
+        try:
+            assert all(isinstance(sizes, tuple) for sizes in dyntrans_layer_sizes)
+        except:
+            print("Converting layers to tuples, probably it was not parsed correctly to the config file")
+            dyntrans_layer_sizes = [tuple(layer_size) for layer_size in dyntrans_layer_sizes]
+            assert all(isinstance(sizes, tuple) for sizes in dyntrans_layer_sizes)
         assert all(
             all(size > 0 for size in sizes) for sizes in dyntrans_layer_sizes
         )
@@ -138,14 +146,17 @@ class DynEdgeTITO(GNN):
         # Remaining member variables()
         self._activation = torch.nn.LeakyReLU()
         self._nb_inputs = nb_inputs
+        self._informer = informer
+        self._factor = factor
         self._nb_global_variables = 5 + nb_inputs
         self._nb_neighbours = nb_neighbours
         self._features_subset = features_subset or [0, 1, 2, 3]
         self._use_global_features = use_global_features
         self._use_post_processing_layers = use_post_processing_layers
         self._n_head = n_head
+        self.norm_flows_range = norm_flows_range
         self._construct_layers()
-
+        
     def _construct_layers(self) -> None:
         """Construct layers (torch.nn.Modules)."""
         # Convolutional operations
@@ -153,13 +164,25 @@ class DynEdgeTITO(GNN):
 
         self._conv_layers = torch.nn.ModuleList()
         nb_latent_features = nb_input_features
+        
+        Transflayer = DynInformer if self._informer else DynTrans
+        
         for sizes in self._dyntrans_layer_sizes:
-            conv_layer = DynTrans(
+            if self._informer:
+                conv_layer = Transflayer(
                 [nb_latent_features] + list(sizes),
                 aggr="max",
+                factor = self._factor,
                 features_subset=self._features_subset,
                 n_head=self._n_head,
             )
+            else:
+                conv_layer = Transflayer(
+                    [nb_latent_features] + list(sizes),
+                    aggr="max",
+                    features_subset=self._features_subset,
+                    n_head=self._n_head,
+                )
             self._conv_layers.append(conv_layer)
             nb_latent_features = sizes[-1]
 
@@ -194,6 +217,8 @@ class DynEdgeTITO(GNN):
         for nb_in, nb_out in zip(layer_sizes[:-1], layer_sizes[1:]):
             readout_layers.append(torch.nn.Linear(nb_in, nb_out))
             readout_layers.append(self._activation)
+        if self.norm_flows_range:
+            readout_layers[-1] = torch.nn.Tanh()
 
         self._readout = torch.nn.Sequential(*readout_layers)
 
@@ -274,5 +299,4 @@ class DynEdgeTITO(GNN):
 
         # Read-out
         x = self._readout(x)
-
         return x

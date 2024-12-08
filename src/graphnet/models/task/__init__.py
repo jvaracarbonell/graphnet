@@ -5,4 +5,6 @@ from .task import (
     IdentityTask,
     StandardLearnedTask,
     StandardFlowTask,
+    DirRecoStandardFlowTask,
+    EnergyRecoStandardFlowTask
 )

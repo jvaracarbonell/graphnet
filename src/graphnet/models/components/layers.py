@@ -16,6 +16,9 @@ from torch.nn.modules import TransformerEncoder, TransformerEncoderLayer
 from torch_geometric.utils import to_dense_batch
 from pytorch_lightning import LightningModule
 
+from informer.models.attn import ProbAttention, AttentionLayer, FullAttention
+from informer.models.encoder import EncoderLayer, Encoder
+
 
 class DynEdgeConv(EdgeConv, LightningModule):
     """Dynamical edge convolution layer."""
@@ -166,12 +169,14 @@ class DynTrans(EdgeConvTito, LightningModule):
         self.norm1 = nn.LayerNorm(d_model, eps=1e-5)  # lNorm
 
         # Transformer layer(s)
+
         encoder_layer = TransformerEncoderLayer(
-            d_model=d_model,
+            d_model=d_model, #enc_in
             nhead=n_head,
             batch_first=True,
             norm_first=False,
         )
+
         self._transformer_encoder = TransformerEncoder(
             encoder_layer, num_layers=1
         )
@@ -188,14 +193,102 @@ class DynTrans(EdgeConvTito, LightningModule):
             x = x_out
 
         x = self.norm1(x)  # lNorm
-
         # Transformer layer
         x, mask = to_dense_batch(x, batch)
         x = self._transformer_encoder(x, src_key_padding_mask=~mask)
         x = x[mask]
-
         return x
 
+
+class DynInformer(EdgeConvTito, LightningModule):
+    """Implementation of dynTrans1 layer used in TITO solution for.
+
+    'IceCube - Neutrinos in Deep' kaggle competition.
+    
+    The transformer implementation is based on the informer:
+    https://github.com/zhouhaoyi/Informer2020.git
+    
+    The idea is to use their ProbSparse attention which can easily handle
+    long sequences.
+    """
+
+    def __init__(
+        self,
+        layer_sizes: Optional[List[int]] = None,
+        aggr: str = "max",
+        features_subset: Optional[Union[Sequence[int], slice]] = None,
+        factor: int = 5,
+        n_head: int = 8,
+        **kwargs: Any,
+    ):
+        """Construct `DynInformer`.
+
+        Args:
+            layer_sizes: List of layer sizes to be used in `DynInformer`.
+            aggr: Aggregation method to be used with `DynInformer`.
+            features_subset: Subset of features in `Data.x` that should be used
+                when dynamically performing the new graph clustering after the
+                `EdgeConv` operation. Defaults to all features.
+            n_head: Number of heads to be used in the multiheadattention
+                models.
+            **kwargs: Additional features to be passed to `DynInformer`.
+        """
+        # Check(s)
+        if features_subset is None:
+            features_subset = slice(None)  # Use all features
+        assert isinstance(features_subset, (list, slice))
+
+        if layer_sizes is None:
+            layer_sizes = [256, 256, 256]
+        layers = []
+        for ix, (nb_in, nb_out) in enumerate(
+            zip(layer_sizes[:-1], layer_sizes[1:])
+        ):
+            if ix == 0:
+                nb_in *= 3  # edgeConv1
+            layers.append(nn.Linear(nb_in, nb_out))
+            layers.append(nn.LeakyReLU())
+        d_model = nb_out
+
+        # Base class constructor
+        super().__init__(nn=nn.Sequential(*layers), aggr=aggr, **kwargs)
+
+        # Additional member variables
+        self.features_subset = features_subset
+
+        self.norm1 = nn.LayerNorm(d_model, eps=1e-5)  # lNorm
+
+        # Transformer layer(s)
+
+        Attn = ProbAttention
+        encoder_layer =   EncoderLayer(
+                    AttentionLayer(Attn(mask_flag=True, factor=factor, attention_dropout=0.0, output_attention=False), 
+                                d_model, n_heads=8, mix=False),
+                    d_model,
+                    #d_ff=512,
+                    dropout=0,
+                    activation="gelu"
+                )
+        self._transformer_encoder = Encoder([encoder_layer])
+
+    def forward(
+        self, x: Tensor, edge_index: Adj, batch: Optional[Tensor] = None
+    ) -> Tensor:
+        """Forward pass."""
+        x_out = super().forward(x, edge_index)
+
+        if x_out.shape[-1] == x.shape[-1]:
+            x = x + x_out
+        else:
+            x = x_out
+
+        x = self.norm1(x)  # lNorm
+        # Transformer layer
+        x, mask = to_dense_batch(x, batch)
+        x = self._transformer_encoder(x, attn_mask=~mask)[0]
+        x = x[mask]
+       
+        return x
 
 class DropPath(LightningModule):
     """Drop paths (Stochastic Depth) per sample."""
