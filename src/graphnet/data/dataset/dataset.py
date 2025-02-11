@@ -505,12 +505,12 @@ class Dataset(
 
         # Remove missing truth variables
         if missing_truth_variables:
-            self.warning(
-                (
-                    "Removing the following (missing) truth variables: "
-                    + ", ".join(missing_truth_variables)
-                )
-            )
+            #self.warning(
+            #    (
+            #        "Removing the following (missing) truth variables: "
+            #        + ", ".join(missing_truth_variables)
+            #    )
+            #)
             for missing_truth_variable in missing_truth_variables:
                 self._truth.remove(missing_truth_variable)
 

@@ -218,19 +218,20 @@ class EasySyntax(Model):
         
         # Find the task with the flow
         task_with_flow = None
-        for task in self._tasks:
-            if hasattr(task, '_flow'):
-                task_with_flow = task
-                break
+        if hasattr(self, "_mixed_precision") and self._mixed_precision:
+            for task in self._tasks:
+                if hasattr(task, '_flow'):
+                    task_with_flow = task
+                    break
+            if task_with_flow is None:
+                raise ValueError("Mixed precision training requested, but no task with a flow was found.")
 
         self._multiple_optimizers = False
-        if task_with_flow is not None and False:
-
+        if task_with_flow is not None:
+            #This is needed if we want to use mixed precision training with float64 (flow parameters) and float32 (rest of the model)
+            self.info("Training with multiple optimizers, disabling automatic_optimization")
             optimizers = []
             schedulers = []
-
-
-            print("Training with multiple optimizers, disabling automatic_optimization")
             self.automatic_optimization = False
             self._multiple_optimizers = True
             # Optimizer for the flow (float64 parameters)
@@ -260,7 +261,6 @@ class EasySyntax(Model):
             return optimizers  # Return the optimizers if no schedulers are set
 
         else:
-            # If no task with flow is found, configure a single optimizer
             optimizer = self._optimizer_class(
             self.parameters(), **self._optimizer_kwargs
             )

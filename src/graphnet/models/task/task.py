@@ -479,6 +479,9 @@ class DirRecoStandardFlowTask(Task):
         hidden_size: Union[int, None],
         flow_layers: str = "vvvvvv", # 9 vs might be better
         add_rotation = False,
+        loss_weights = None,
+        training_only: bool = False,
+        initialized = False,
         **task_kwargs: Any,
     ):
         """Construct `DirRecoStandardFlowTask`.
@@ -498,6 +501,11 @@ class DirRecoStandardFlowTask(Task):
         self._hidden_size = hidden_size
         self._flow_layers = flow_layers
         self._add_rotation = add_rotation
+        self._training_only = training_only
+        try:
+            self._loss_weight = loss_weights
+        except:
+            self._loss_weight = None
         super().__init__(**task_kwargs)
         opt_dict=dict()
 
@@ -523,7 +531,7 @@ class DirRecoStandardFlowTask(Task):
                 #options_overwrite=opt_dict,
             )
         
-        self._initialized = True#False
+        self._initialized = initialized
 
     @property
     def default_prediction_labels(self) -> List[str]:
@@ -534,7 +542,7 @@ class DirRecoStandardFlowTask(Task):
         """Return number of conditional inputs assumed by task."""
         return self._hidden_size
 
-    def _forward(self, x: Optional[Tensor], y: Tensor) -> Tensor:  # type: ignore
+    def _forward(self, x: Optional[Tensor], y: Tensor, weights: Optional[Tensor]) -> Tensor:  # type: ignore
         if x is not None:
             #print(f"Labels are {y} \n")
             if x.shape[0] != y.shape[0]:
@@ -565,6 +573,9 @@ class DirRecoStandardFlowTask(Task):
         else:
             log_pdf, _, _ = self._flow(y)
         
+        if self._loss_weight is not None:
+            log_pdf = log_pdf * weights
+        
         return -log_pdf.reshape(-1, 1)
 
     @final
@@ -576,6 +587,7 @@ class DirRecoStandardFlowTask(Task):
         self._flow = self._flow.to(dtype=torch.float64)
         # Get target values
         labels = get_fields(data=data, fields=self._target_labels)
+        #print(f"zeniths are: {get_fields(data=data, fields=['zenith'])}")
         labels = labels.to(dtype=torch.float64)
         # Set the initial parameters of flow close to truth
         # This speeds up training and helps with NaN
@@ -588,13 +600,15 @@ class DirRecoStandardFlowTask(Task):
         if self.training:
             # Compute nllh
             x = x.to(dtype=torch.float64)
-            x = self._forward(x, labels)
-            #print("Esto es lo que devuelve: ", self._transform_prediction(x))
+            if self._loss_weight is not None:
+                weights = get_fields(data=data, fields=self._loss_weight)
+                x = self._forward(x, labels, weights)
+            else:
+                weights = None
+                x = self._forward(x, labels, weights)
             return self._transform_prediction(x)
         else:
-            try:
-                #print("Labels: ", labels)
-                # Attempt the forward pass and result computation for the batch
+            if not self._training_only:
                 result_dict = self._flow.coverage_and_or_pdf_scan(
                     labels=labels,
                     conditional_input=x,
@@ -641,24 +655,15 @@ class DirRecoStandardFlowTask(Task):
                 # Print to check the values and their shapes
                 print("reco zenith:", map_positions_angle_0_batch)
                 print("reco azimuth:", map_positions_angle_1_batch)
-                print("approx_cov_value_0:", approx_cov_value_0_batch) # This is a test, do not use this one
+                print("approx_cov_value_0:", approx_cov_value_0_batch)
 
                 return output
 
-            except Exception as e:
-                try:
-                    # In case of any errors (including NaN), return a tensor filled with NaNs for the batch
-                    print("Error occurred during forward pass:", str(e))
-                    batch_size = labels.size(0)
-                    print(f"Nans, batch size is of {batch_size}")
-                    # Return a tensor with NaN values (shape: [batch_size, 3])
-                    nan_tensor = torch.tensor(float('nan')).repeat(batch_size, 3)
-                    return nan_tensor
-                except:
-                    #print("Probably in sanity check mode")
-                    x = x.to(dtype=torch.float64)
-                    x = self._forward(x, labels)
-                    return self._transform_prediction(x)
+            else:
+                x = x.to(dtype=torch.float64)
+                weights = None
+                x = self._forward(x, labels, weights)
+                return self._transform_prediction(x)
 
 
 

@@ -31,6 +31,10 @@ class NormalizingFlow(EasySyntax):
         condition_on: Union[str, List[str], None] = None,
         flow_layers: str = "vvvvvv",
         add_rotation: bool = False,
+        loss_weights: Optional[type] = None,
+        training_only: bool = True,
+        initialized: bool = False,
+        mixed_precision : bool = True,
         optimizer_class: Type[torch.optim.Optimizer] = Adam,
         optimizer_kwargs: Optional[Dict] = None,
         scheduler_class: Optional[type] = None,
@@ -61,6 +65,12 @@ class NormalizingFlow(EasySyntax):
             flow_layers: A string defining the flow layers.
             See https://thoglu.github.io/jammy_flows/usage/introduction.html
             for details. Defaults to "gggt".
+            add_rotation: Whether to add a rotation layer to the flow.
+            loss_weights: Weights for the different losses. Defaults to None.
+            training_only: Whether to only train the flow. Defaults to True.
+            initialized: Whether the flow should be initialized. Defaults to
+            False.
+            mixed_precision: Whether to use mixed precision. Defaults to True.
             optimizer_class: Optimizer to use. Defaults to Adam.
             optimizer_kwargs: Optimzier arguments. Defaults to None.
             scheduler_class: Learning rate scheduler to use. Defaults to None.
@@ -92,14 +102,18 @@ class NormalizingFlow(EasySyntax):
         else:
             hidden_size = None
 
+        self._mixed_precision = mixed_precision
         # Build Flow Task
         
-        FlowTask = DirRecoStandardFlowTask if direction_reco else EnergyRecoStandardFlowTask#StandardFlowTask
+        FlowTask = DirRecoStandardFlowTask if direction_reco else EnergyRecoStandardFlowTask
         task = FlowTask(
             hidden_size=hidden_size,
             flow_layers=flow_layers,
             add_rotation=add_rotation,
+            loss_weights = loss_weights,
             target_labels=target_labels,
+            training_only=training_only,
+            initialized=initialized,
         )
 
         # Base class constructor

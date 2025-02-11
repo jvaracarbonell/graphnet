@@ -299,4 +299,5 @@ class DynEdgeTITO(GNN):
 
         # Read-out
         x = self._readout(x)
+        print(x.max(),x.mean(),x.min())
         return x
